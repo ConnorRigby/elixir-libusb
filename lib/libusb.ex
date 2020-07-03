@@ -1,0 +1,2 @@
+defmodule LibUSB do
+end
