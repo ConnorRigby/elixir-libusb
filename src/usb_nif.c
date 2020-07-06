@@ -16,11 +16,11 @@ static void release_usb_ctx(struct usb_priv *priv, struct usb_rt *usb)
   //   debug("closing handle\r\n");
   //   libusb_close(usb->handle);
   // }
-
-  if (priv->context)
+  (void)priv;
+  if (usb->context)
   {
     debug("closing context\r\n");
-    libusb_exit(priv->context);
+    libusb_exit(usb->context);
   }
 }
 
@@ -63,6 +63,27 @@ static void usb_rt_down(ErlNifEnv *env, void *obj, ErlNifPid *pid, ErlNifMonitor
 
 static ErlNifResourceTypeInit usb_rt_init = {usb_rt_dtor, usb_rt_stop, usb_rt_down};
 
+void *gpio_poller_thread(void *arg)
+{
+  debug("gpio_poller_thread started");
+  int rc;
+  libusb_context *context = arg;
+  debug("context=%p\r\n", context);
+
+  ErlNifEnv *env = enif_alloc_env();
+  ERL_NIF_TERM atom_gpio = enif_make_atom(env, "circuits_gpio");
+
+  for (;;)
+  {
+    rc = libusb_handle_events(context);
+    if (rc < 0)
+      printf("libusb_handle_events() failed: %s\n", libusb_error_name(rc));
+  }
+  enif_free_env(env);
+  debug("gpio_poller_thread ended");
+  return NULL;
+}
+
 static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM info)
 {
   (void)info;
@@ -79,21 +100,17 @@ static int load(ErlNifEnv *env, void **priv_data, ERL_NIF_TERM info)
     error("Can't allocate usb_priv");
     return 1;
   }
-
   priv->usbs_open = 0;
   priv->atom_ok = enif_make_atom(env, "ok");
-
   priv->usb_rt = enif_open_resource_type_x(env, "usb_rt", &usb_rt_init, ERL_NIF_RT_CREATE, NULL);
-
   *priv_data = (void *)priv;
   return 0;
 }
 
 static void unload(ErlNifEnv *env, void *priv_data)
 {
-  (void)env;
-
   struct usb_priv *priv = priv_data;
+  (void)env;
   (void)priv;
   debug("unload");
 }
@@ -101,7 +118,7 @@ static void unload(ErlNifEnv *env, void *priv_data)
 static ERL_NIF_TERM open_usb(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
 {
   struct usb_priv *priv = enif_priv_data(env);
-  int r, vendor_id, product_id;
+  int vendor_id, product_id;
 
   if (argc != 2 ||
       !enif_get_int(env, argv[0], &vendor_id) ||
@@ -109,18 +126,25 @@ static ERL_NIF_TERM open_usb(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]
     return enif_make_badarg(env);
 
   struct usb_rt *usb = enif_alloc_resource(priv->usb_rt, sizeof(struct usb_rt));
-  r = libusb_init(&priv->context);
+
+  int r = libusb_init(&usb->context);
   if (r != LIBUSB_SUCCESS)
   {
     debug("libusb init failed %s\r\n", libusb_error_name(r));
     return make_error_tuple(env, "libusb_init_fail");
   }
 
-  usb->handle = libusb_open_device_with_vid_pid(priv->context, vendor_id, product_id);
+  usb->handle = libusb_open_device_with_vid_pid(usb->context, vendor_id, product_id);
   if (!usb->handle)
   {
-    libusb_exit(priv->context);
+    libusb_exit(usb->context);
     return make_error_tuple(env, "libusb_dev_open_fail");
+  }
+
+  if (enif_thread_create("usb_thread", &usb->poller_tid, gpio_poller_thread, usb, NULL) != 0)
+  {
+    error("enif_thread_create failed");
+    return 1;
   }
 
   // Transfer ownership of the resource to Erlang so that it can be garbage collected.

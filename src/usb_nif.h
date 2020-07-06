@@ -24,15 +24,20 @@
 #define elapsed_microseconds() 0
 #endif
 
+struct usb_transfer {
+    ErlNifPid pid;
+    
+}
+
 struct usb_priv {
     ERL_NIF_TERM atom_ok;
     ErlNifResourceType *usb_rt;
-    libusb_context* context;
     int usbs_open;
 };
 
 struct usb_rt {
-    ErlNifPid pid;
+    ErlNifTid poller_tid;
+    libusb_context* context;
     libusb_device_handle* handle;
 };
 
